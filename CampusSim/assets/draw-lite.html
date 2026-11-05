@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>CampusSim 画布</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#121820;color:#e6edf3;
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  #c{position:absolute;top:0;left:0;width:100%;height:100%;display:block;touch-action:none}
+  #hud{position:absolute;left:8px;top:8px;background:rgba(13,18,24,.9);border:1px solid #2a3442;
+       border-radius:10px;padding:8px 10px;font-size:12px;line-height:1.7;z-index:10;max-width:62%}
+  #hud b{color:#58a6ff;font-size:15px}
+  #bar{position:absolute;left:0;right:0;bottom:0;background:rgba(13,18,24,.94);border-top:1px solid #2a3442;
+       padding:8px 10px 14px;z-index:10;display:flex;flex-wrap:wrap;gap:6px}
+  button{background:#22303f;color:#dfe9f5;border:1px solid #33465c;border-radius:8px;padding:8px 12px;font-size:13px}
+  button.on{background:#1f6feb;border-color:#2f81f7;color:#fff}
+  button.warn{background:#5b2130;border-color:#7d2b40}
+  button.go{background:#1a7f4b;border-color:#2ea043;color:#fff}
+  #toast{position:absolute;left:50%;top:12px;transform:translateX(-50%);background:#1f6feb;color:#fff;
+         padding:8px 14px;border-radius:8px;font-size:13px;display:none;z-index:20}
+  .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;width:100%}
+  input{background:#0d1218;border:1px solid #33465c;color:#e6edf3;border-radius:6px;padding:5px 7px;width:70px;font-size:13px}
+  .k{color:#8fa3b8;font-size:12px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div>总长 <b id="len">0</b> m · 预计 <span id="t">0:00</span></div>
+  <div id="info" class="k">点位 0 · 打卡 0 · 1px≈0.5m</div>
+  <div id="tip" class="k">点空白加点 · 拖动平移 · 双指/滚轮缩放</div>
+</div>
+<div id="toast"></div>
+<div id="bar">
+  <div class="row">
+    <button id="bDraw" class="on">画线</button>
+    <button id="bCp">加打卡点</button>
+    <button id="bUndo">撤销</button>
+    <button id="bClear" class="warn">清空</button>
+    <button id="bClose">闭合</button>
+    <button id="bFit">居中</button>
+  </div>
+  <div class="row">
+    <span class="k">配速</span><input id="pace" value="330"><span class="k">s/km</span>
+    <span class="k">步频</span><input id="spm" value="172">
+    <span class="k">休息/km</span><input id="rpkm" value="0.8">
+    <span class="k">打卡半径</span><input id="rad" value="25"><span class="k">m</span>
+  </div>
+  <div class="row">
+    <button id="bGen" class="go">生成配置</button>
+    <button id="bPush" class="go">推送到手机</button>
+    <button id="bLoad">载入上次</button>
+  </div>
+</div>
+
+<script>
+/* ---------- 状态 ---------- */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = Math.min(2, window.devicePixelRatio || 1);
+const V = { lat: 30.4620, lng: 114.4350, mpp: 0.5 };   // 视图中心 + 每像素米数
+const S = { nodes: [], cps: [], closed: false, mode: 'draw' };
+const R = 6378137.0;
+
+/* ---------- 投影（以视图中心为原点的局部米制坐标） ---------- */
+function toM(lat, lng) {
+  const x = (lng - V.lng) * Math.PI / 180 * R * Math.cos(V.lat * Math.PI / 180);
+  const y = (lat - V.lat) * Math.PI / 180 * R;
+  return [x, y];
+}
+function toLL(x, y) {
+  const lat = V.lat + (y / R) * 180 / Math.PI;
+  const lng = V.lng + (x / (R * Math.cos(V.lat * Math.PI / 180))) * 180 / Math.PI;
+  return [lat, lng];
+}
+function sx(mx) { return W / 2 + mx / V.mpp; }
+function sy(my) { return H / 2 - my / V.mpp; }
+
+function hav(a, b) {
+  const la1 = a[0] * Math.PI / 180, la2 = b[0] * Math.PI / 180;
+  const dLa = la2 - la1, dLo = (b[1] - a[1]) * Math.PI / 180;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLo / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(h));
+}
+function totalLen() {
+  let d = 0;
+  for (let i = 1; i < S.nodes.length; i++) d += hav(S.nodes[i - 1], S.nodes[i]);
+  if (S.closed && S.nodes.length > 2) d += hav(S.nodes[S.nodes.length - 1], S.nodes[0]);
+  return d;
+}
+function fmt(t) { const m = Math.floor(t / 60); return m + ':' + String(Math.round(t % 60)).padStart(2, '0'); }
+
+/* ---------- 绘制 ---------- */
+function resize() {
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  draw();
+}
+function gridStep() {
+  const cands = [5, 10, 20, 50, 100, 200, 500, 1000];
+  for (const s of cands) if (s / V.mpp >= 46) return s;
+  return 1000;
+}
+function draw() {
+  ctx.fillStyle = '#121820'; ctx.fillRect(0, 0, W, H);
+
+  // 网格
+  const step = gridStep();
+  ctx.strokeStyle = '#1e2a36'; ctx.lineWidth = 1;
+  const [cx, cy] = toM(V.lat, V.lng);          // 中心米坐标 = 0,0
+  const x0 = Math.round((-W / 2 * V.mpp) / step) * step;
+  const y0 = Math.round((-H / 2 * V.mpp) / step) * step;
+  ctx.font = '10px monospace'; ctx.fillStyle = '#3d5568';
+  for (let x = x0; x <= x0 + W * V.mpp + step; x += step) {
+    const px = Math.round(sx(x));
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+    const ll = toLL(x, 0);
+    ctx.fillText(ll[1].toFixed(5), px + 3, 12);
+  }
+  for (let y = y0; y <= y0 + H * V.mpp + step; y += step) {
+    const py = Math.round(sy(y));
+    ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W, py); ctx.stroke();
+    const ll = toLL(0, y);
+    ctx.fillText(ll[0].toFixed(5), 4, py - 3);
+  }
+
+  // 折线
+  if (S.nodes.length) {
+    ctx.strokeStyle = '#2f81f7'; ctx.lineWidth = 5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.beginPath();
+    S.nodes.forEach((p, i) => {
+      const [mx, my] = toM(p[0], p[1]);
+      const x = sx(mx), y = sy(my);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    if (S.closed && S.nodes.length > 2) {
+      const [m0x, m0y] = toM(S.nodes[0][0], S.nodes[0][1]);
+      ctx.lineTo(sx(m0x), sy(m0y));
+    }
+    ctx.stroke();
+    S.nodes.forEach((p, i) => {
+      const [mx, my] = toM(p[0], p[1]);
+      const x = sx(mx), y = sy(my);
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fillStyle = '#1f6feb'; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+      if (i === 0) { ctx.fillStyle = '#e6edf3'; ctx.font = '11px sans-serif'; ctx.fillText('起', x + 9, y - 9); }
+    });
+  }
+
+  // 打卡点
+  S.cps.forEach((p, i) => {
+    const [mx, my] = toM(p[0], p[1]);
+    const x = sx(mx), y = sy(my);
+    const rad = (+document.getElementById('rad').value || 25) / V.mpp;
+    ctx.beginPath(); ctx.arc(x, y, Math.max(6, rad), 0, 7);
+    ctx.fillStyle = 'rgba(240,136,62,.14)'; ctx.fill();
+    ctx.strokeStyle = '#f0883e'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, 10, 0, 7); ctx.fillStyle = '#f0883e'; ctx.fill();
+    ctx.fillStyle = '#111'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String.fromCharCode(65 + i), x, y);
+    ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+  });
+
+  // 比例尺 + 中心十字
+  const barM = gridStep();
+  const barPx = barM / V.mpp;
+  ctx.strokeStyle = '#8fa3b8'; ctx.lineWidth = 2;
+  const bx = W - barPx - 16, by = H - 118;
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + barPx, by);
+  ctx.moveTo(bx, by - 5); ctx.lineTo(bx, by + 5);
+  ctx.moveTo(bx + barPx, by - 5); ctx.lineTo(bx + barPx, by + 5); ctx.stroke();
+  ctx.fillStyle = '#8fa3b8'; ctx.font = '11px monospace';
+  ctx.fillText(barM + ' m', bx + barPx / 2 - 12, by - 8);
+
+  ctx.strokeStyle = '#3d5568'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(W / 2 - 8, H / 2); ctx.lineTo(W / 2 + 8, H / 2);
+  ctx.moveTo(W / 2, H / 2 - 8); ctx.lineTo(W / 2, H / 2 + 8); ctx.stroke();
+
+  hud();
+}
+function hud() {
+  const len = totalLen();
+  const pace = +document.getElementById('pace').value || 330;
+  const spm = +document.getElementById('spm').value || 172;
+  document.getElementById('len').textContent = len.toFixed(0);
+  document.getElementById('t').textContent = fmt(len * pace / 1000);
+  const steps = Math.round(len / (1000 / pace) * spm / 60);
+  document.getElementById('info').textContent =
+    `点位 ${S.nodes.length} · 打卡 ${S.cps.length} · 步数≈${steps} · 1px≈${V.mpp.toFixed(2)}m`;
+}
+
+/* ---------- 交互 ---------- */
+let drag = null, pinch = null;
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  const [x, y] = pos(e);
+  drag = { x, y, moved: false, t: Date.now() };
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const [x, y] = pos(e);
+  const dx = x - drag.x, dy = y - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+  if (drag.moved) {
+    V.lng -= dx * V.mpp / (R * Math.cos(V.lat * Math.PI / 180)) * 180 / Math.PI;
+    V.lat += dy * V.mpp / R * 180 / Math.PI;
+    drag.x = x; drag.y = y;
+    draw();
+  }
+});
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const [x, y] = pos(e);
+  if (!drag.moved && Date.now() - drag.t < 700) {
+    const [mx, my] = [(x - W / 2) * V.mpp, (H / 2 - y) * V.mpp];
+    const ll = toLL(mx, my);
+    if (S.mode === 'draw') S.nodes.push(ll); else S.cps.push(ll);
+    draw();
+  }
+  drag = null;
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  V.mpp = Math.min(20, Math.max(0.05, V.mpp * (e.deltaY > 0 ? 1.15 : 0.87)));
+  draw();
+}, { passive: false });
+cv.addEventListener('touchmove', e => {
+  if (e.touches.length === 2) {
+    e.preventDefault();
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    if (pinch) { V.mpp = Math.min(20, Math.max(0.05, V.mpp * (pinch / d))); draw(); }
+    pinch = d;
+  }
+}, { passive: false });
+cv.addEventListener('touchend', () => { pinch = null; });
+
+document.getElementById('bDraw').onclick = () => setMode('draw');
+document.getElementById('bCp').onclick = () => setMode('cp');
+function setMode(m) {
+  S.mode = m;
+  document.getElementById('bDraw').classList.toggle('on', m === 'draw');
+  document.getElementById('bCp').classList.toggle('on', m === 'cp');
+  document.getElementById('tip').textContent = m === 'draw' ? '点空白加点 · 拖动平移' : '点空白加打卡点 · 拖动平移';
+}
+document.getElementById('bUndo').onclick = () => { (S.mode === 'cp' ? S.cps : S.nodes).pop(); draw(); };
+document.getElementById('bClear').onclick = () => { S.nodes = []; S.cps = []; draw(); };
+document.getElementById('bClose').onclick = e => { S.closed = !S.closed; e.target.classList.toggle('on', S.closed); draw(); };
+document.getElementById('bFit').onclick = () => {
+  if (!S.nodes.length) return;
+  let la = 0, lo = 0;
+  S.nodes.forEach(p => { la += p[0]; lo += p[1]; });
+  V.lat = la / S.nodes.length; V.lng = lo / S.nodes.length;
+  let maxd = 0;
+  S.nodes.forEach(p => { const [mx, my] = toM(p[0], p[1]); maxd = Math.max(maxd, Math.abs(mx), Math.abs(my)); });
+  V.mpp = Math.max(0.1, (maxd * 2.4) / Math.min(W, H));
+  draw();
+};
+['pace', 'spm', 'rpkm', 'rad'].forEach(id => document.getElementById(id).onchange = draw);
+
+/* ---------- 配置 ---------- */
+function buildConfig() {
+  return {
+    enabled: true,
+    targets: ['com.lptiyu.tanke'],
+    route: S.nodes.map(p => [+p[0].toFixed(6), +p[1].toFixed(6)]),
+    checkpoints: S.cps.map(p => [+p[0].toFixed(6), +p[1].toFixed(6)]),
+    checkpointRadius: +document.getElementById('rad').value || 25,
+    paceSecPerKm: +document.getElementById('pace').value || 330,
+    speedJitter: 0.06,
+    spmBase: +document.getElementById('spm').value || 172,
+    spmJitter: 4,
+    restsPerKm: +document.getElementById('rpkm').value || 0,
+    restMinSec: 15, restMaxSec: 60,
+    randomStart: true, randomDir: true,
+    heartbeat: 10, seed: 0,
+    wifi: true, cell: true, ble: true, accel: true
+  };
+}
+function toast(m, ms) {
+  const t = document.getElementById('toast');
+  t.textContent = m; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms || 1800);
+}
+document.getElementById('bGen').onclick = () => {
+  if (S.nodes.length < 2) return toast('至少画两个点');
+  const cfg = buildConfig();
+  window._cfg = JSON.stringify(cfg);
+  try { localStorage.setItem('campusim.lite', window._cfg); } catch (e) { }
+  toast('配置已生成（' + cfg.route.length + ' 点 / ' + cfg.checkpoints.length + ' 打卡点）');
+};
+document.getElementById('bPush').onclick = async () => {
+  if (S.nodes.length < 2) return toast('至少画两个点');
+  const cfg = buildConfig();
+  const txt = JSON.stringify(cfg);
+  try { localStorage.setItem('campusim.lite', txt); } catch (e) { }
+  if (window.CampusBridge && window.CampusBridge.saveConfig) {
+    const p = window.CampusBridge.saveConfig(txt);
+    return toast('已保存到手机：\n' + p, 4000);
+  }
+  try {
+    const r = await fetch('/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: txt });
+    const j = await r.json();
+    return toast(j.ok ? '已推送：' + j.detail : '推送失败：' + j.detail, 3000);
+  } catch (e) { }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
+  a.download = 'campusim.json'; a.click();
+  toast('已下载 campusim.json');
+};
+document.getElementById('bLoad').onclick = () => {
+  try {
+    const raw = localStorage.getItem('campusim.lite');
+    if (!raw) return toast('没有本地记录');
+    const c = JSON.parse(raw);
+    if (c.route) S.nodes = c.route.map(p => [p[0], p[1]]);
+    if (c.checkpoints) S.cps = c.checkpoints.map(p => [p[0], p[1]]);
+    if (c.paceSecPerKm) document.getElementById('pace').value = c.paceSecPerKm;
+    if (c.spmBase) document.getElementById('spm').value = c.spmBase;
+    draw();
+    toast('已载入');
+  } catch (e) { toast('载入失败'); }
+};
+
+/* 手机 App 里可能存过配置：能读就载入 */
+if (window.CampusBridge && window.CampusBridge.loadConfig) {
+  try {
+    const txt = window.CampusBridge.loadConfig();
+    if (txt && txt.length > 20) {
+      const c = JSON.parse(txt);
+      if (c.route && c.route.length) S.nodes = c.route.map(p => [p[0], p[1]]);
+      if (c.checkpoints) S.cps = c.checkpoints.map(p => [p[0], p[1]]);
+    }
+  } catch (e) { }
+}
+
+window.addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>

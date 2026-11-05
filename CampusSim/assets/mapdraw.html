@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>CampusSim 路径绘制</title>
+<script>
+window.onerror = function (m, s, l, c) {
+  var d = document.getElementById('errbox');
+  if (!d) {
+    d = document.createElement('div');
+    d.id = 'errbox';
+    d.style.cssText = 'position:absolute;left:8px;right:8px;bottom:48%;z-index:3000;background:#5b2130;color:#fff;' +
+      'padding:8px;font-size:12px;white-space:pre-wrap;border-radius:8px;max-height:30%;overflow:auto';
+    document.body.appendChild(d);
+  }
+  d.textContent += m + ' @' + (s || '') + ':' + l + ':' + c + '\n';
+};
+</script>
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="https://cdn.staticfile.org/leaflet/1.9.4/leaflet.css">
+<style>
+  html,body{margin:0;height:100%;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#11151c;color:#e8eef6;overflow:hidden}
+  #map{position:absolute;top:0;left:0;right:0;bottom:0;width:100%;height:100%}
+  #panel{position:absolute;left:0;right:0;bottom:0;max-height:46%;overflow:auto;background:rgba(17,21,28,.94);
+         backdrop-filter:blur(8px);border-top:1px solid #2a3442;padding:10px 12px 16px;z-index:1200}
+  #panel.min{max-height:44px;overflow:hidden}
+  .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0}
+  button{background:#22303f;color:#dfe9f5;border:1px solid #33465c;border-radius:8px;padding:7px 11px;font-size:13px}
+  button.on{background:#1f6feb;border-color:#2f81f7;color:#fff}
+  button.warn{background:#5b2130;border-color:#7d2b40}
+  button.go{background:#1a7f4b;border-color:#2ea043;color:#fff}
+  input[type=number],input[type=text]{background:#0d1218;border:1px solid #33465c;color:#e8eef6;border-radius:6px;padding:5px 7px;width:74px;font-size:13px}
+  input[type=range]{width:110px}
+  .k{color:#8fa3b8;font-size:12px}
+  .pill{background:#1b2531;border:1px solid #2a3442;border-radius:999px;padding:3px 9px;font-size:12px;color:#a9bccf}
+  .ok{color:#3fb950}.bad{color:#f85149}
+  #hud{position:absolute;left:10px;top:10px;z-index:1100;background:rgba(17,21,28,.86);border:1px solid #2a3442;
+       border-radius:10px;padding:8px 10px;font-size:12px;line-height:1.7;max-width:46vw}
+  #hud b{font-size:15px;color:#58a6ff}
+  #cpList .cp{display:inline-flex;align-items:center;gap:4px;background:#1b2531;border:1px solid #2a3442;
+              border-radius:6px;padding:2px 6px;margin:2px;font-size:12px}
+  #cpList .cp span.x{color:#f85149;cursor:pointer}
+  canvas{width:100%;height:110px;background:#0d1218;border:1px solid #2a3442;border-radius:8px}
+  #toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:#1f6feb;color:#fff;
+         padding:8px 14px;border-radius:8px;font-size:13px;display:none;z-index:2000}
+  .leaflet-container{background:#0d1218}
+  /* 兼容 Android WebView 83：瓦片透明度动画不生效会导致整片不显示 */
+  .leaflet-tile{opacity:1 !important;transition:none !important}
+  .leaflet-tile-container{will-change:auto !important;transform:none !important}
+  details summary{cursor:pointer;color:#8fa3b8;font-size:12px;margin:6px 0}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">
+  <div>总长 <b id="hLen">0</b> m</div>
+  <div>预计 <span id="hTime">0:00</span> · 步数 <span id="hSteps">0</span></div>
+  <div id="hCheck" class="k">点位 0 · 打卡 0</div>
+  <div id="tileBadge" class="k">瓦片:检测中…</div>
+</div>
+<div id="toast"></div>
+
+<div id="panel">
+  <div class="row">
+    <button id="bDraw" class="on">画线</button>
+    <button id="bCp">加打卡点</button>
+    <button id="bUndo">撤销</button>
+    <button id="bClear" class="warn">清空</button>
+    <button id="bClose">闭合</button>
+    <button id="bSim">预演</button>
+    <button id="bGen" class="go">生成配置</button>
+    <button id="bPush">推送到手机</button>
+    <span class="pill" id="modePill">画线模式</span>
+  </div>
+
+  <div class="row">
+    <span class="k">配速</span><input id="pace" type="number" value="330" step="5"><span class="k">s/km</span>
+    <span class="k">步频</span><input id="spm" type="number" value="172" step="1"><span class="k">spm</span>
+    <span class="k">速度抖动</span><input id="jit" type="number" value="0.06" step="0.01">
+    <span class="k">步频抖动</span><input id="spmJ" type="number" value="4" step="1">
+  </div>
+  <div class="row">
+    <span class="k">每公里休息次数</span><input id="rpkm" type="number" value="0.8" step="0.1">
+    <span class="k">单次</span><input id="rmin" type="number" value="15" step="5">~<input id="rmax" type="number" value="60" step="5"><span class="k">s</span>
+    <span class="k">打卡半径</span><input id="rad" type="number" value="25" step="5"><span class="k">m</span>
+  </div>
+  <div class="row">
+    <label class="k"><input id="rStart" type="checkbox" checked> 随机起点</label>
+    <label class="k"><input id="rDir" type="checkbox" checked> 随机方向</label>
+    <label class="k"><input id="hb" type="checkbox" checked> 心跳日志</label>
+    <span class="k">seed</span><input id="seed" type="number" value="0" step="1">
+  </div>
+  <div class="row" id="cpList"></div>
+  <canvas id="spd" width="900" height="110"></canvas>
+  <details>
+    <summary>自检 / 输出</summary>
+    <pre id="out" style="white-space:pre-wrap;font-size:12px;color:#a9bccf;margin:6px 0"></pre>
+  </details>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script>
+if (!window.L) { document.write('<script src="https://cdn.staticfile.org/leaflet/1.9.4/leaflet.js"><\/script>'); }
+</script>
+<script>
+if (!window.L) { document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>'); }
+</script>
+<script>
+/* ---------------- 坐标转换：WGS-84 <-> GCJ-02 ---------------- */
+const PI = Math.PI, A = 6378245.0, EE = 0.00669342162296594323;
+function outOfChina(lat, lng) { return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271; }
+function tLat(x, y) {
+  let r = -100 + 2*x + 3*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+  r += (20*Math.sin(6*x*PI) + 20*Math.sin(2*x*PI)) * 2/3;
+  r += (20*Math.sin(y*PI) + 40*Math.sin(y/3*PI)) * 2/3;
+  r += (160*Math.sin(y/12*PI) + 320*Math.sin(y*PI/30.0)) * 2/3;
+  return r;
+}
+function tLng(x, y) {
+  let r = 300 + x + 2*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+  r += (20*Math.sin(6*x*PI) + 20*Math.sin(2*x*PI)) * 2/3;
+  r += (20*Math.sin(x*PI) + 40*Math.sin(x/3*PI)) * 2/3;
+  r += (150*Math.sin(x/12*PI) + 300*Math.sin(x/30*PI)) * 2/3;
+  return r;
+}
+function wgs2gcj(lat, lng) {
+  if (outOfChina(lat, lng)) return [lat, lng];
+  let dLat = tLat(lng - 105, lat - 35), dLng = tLng(lng - 105, lat - 35);
+  const radLat = lat / 180 * PI;
+  let magic = Math.sin(radLat); magic = 1 - EE * magic * magic;
+  const sq = Math.sqrt(magic);
+  dLat = (dLat * 180) / ((A * (1 - EE)) / (magic * sq) * PI);
+  dLng = (dLng * 180) / (A / sq * Math.cos(radLat) * PI);
+  return [lat + dLat, lng + dLng];
+}
+function gcj2wgs(lat, lng) {
+  let wLat = lat, wLng = lng;
+  for (let i = 0; i < 6; i++) {
+    const [gLat, gLng] = wgs2gcj(wLat, wLng);
+    wLat += lat - gLat; wLng += lng - gLng;
+  }
+  return [wLat, wLng];
+}
+function hav(a, b) {
+  const R = 6371000, la1 = a[0]*PI/180, la2 = b[0]*PI/180;
+  const dLa = la2 - la1, dLo = (b[1]-a[1])*PI/180;
+  const h = Math.sin(dLa/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLo/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+/* ---------------- 地图 ---------------- */
+if (!window.L) {
+  document.getElementById('map').innerHTML =
+    '<div style="padding:24px;color:#f85149;font-size:14px;line-height:1.8">' +
+    'Leaflet 未加载。<br>· 电脑：用 mkserver.py 打开 http://127.0.0.1:8765/mapdraw.html<br>' +
+    '· 手机：确认 App 版本 ≥ 1.2（内置 vendor/leaflet.js）</div>';
+  throw new Error('leaflet missing');
+}
+const G = (lat, lng) => wgs2gcj(lat, lng);          // 数据用 WGS，显示换 GCJ
+
+/* Canvas 瓦片层：老 WebView 里 <img> 瓦片可能不合成，改成 drawImage 到 canvas */
+const CanvasTiles = L.GridLayer.extend({
+  createTile: function (coords, done) {
+    const c = document.createElement('canvas');
+    const size = this.getTileSize();
+    c.width = size.x; c.height = size.y;
+    const ctx = c.getContext('2d');
+    const url = 'https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x='
+      + coords.x + '&y=' + coords.y + '&z=' + coords.z;
+    const img = new Image();
+    img.onload = function () {
+      try { ctx.drawImage(img, 0, 0, size.x, size.y); } catch (e) { }
+      done(null, c);
+    };
+    img.onerror = function (e) {
+      ctx.fillStyle = '#121820'; ctx.fillRect(0, 0, size.x, size.y);
+      ctx.strokeStyle = '#22303f'; ctx.strokeRect(0.5, 0.5, size.x - 1, size.y - 1);
+      done(e, c);
+    };
+    img.src = url;
+    return c;
+  }
+});
+const canvasTiles = new CanvasTiles({ maxZoom: 19, tileSize: 256, updateWhenIdle: false });
+const CENTER = [30.4620, 114.4350];
+const SOURCES = [
+  { name: '高德', tpl: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', sub: ['1','2','3','4'] },
+  { name: '高德B', tpl: 'https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', sub: ['1','2','3','4'] },
+  { name: '高德http', tpl: 'http://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', sub: ['1','2','3','4'] },
+  { name: 'OSM', tpl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', sub: null }
+];
+function probeTile(tpl, sub) {
+  return new Promise(resolve => {
+    const z = 15, lat = CENTER[0], lng = CENTER[1];
+    const x = Math.floor((lng + 180) / 360 * Math.pow(2, z));
+    const y = Math.floor((1 - Math.log(Math.tan(lat * PI / 180) + 1 / Math.cos(lat * PI / 180)) / PI) / 2 * Math.pow(2, z));
+    let u = tpl.replace('{x}', x).replace('{y}', y).replace('{z}', z);
+    if (sub) u = u.replace('{s}', sub[0]);
+    const im = new Image();
+    let fin = false;
+    const done = ok => { if (fin) return; fin = true; im.onload = im.onerror = null; resolve(ok); };
+    const timer = setTimeout(() => done(false), 4000);
+    im.onload = () => { clearTimeout(timer); done(im.naturalWidth > 0); };
+    im.onerror = () => { clearTimeout(timer); done(false); };
+    im.src = u;
+  });
+}
+const OfflineGrid = L.GridLayer.extend({
+  createTile: function (coords) {
+    const size = this.getTileSize();
+    const c = document.createElement('canvas');
+    c.width = size.x; c.height = size.y;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#121820'; ctx.fillRect(0, 0, size.x, size.y);
+    ctx.strokeStyle = '#22303f'; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const p = i * size.x / 4;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, size.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(size.x, p); ctx.stroke();
+    }
+    const n = Math.pow(2, coords.z);
+    const lon = coords.x / n * 360 - 180;
+    const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * coords.y / n))) * 180 / PI;
+    ctx.fillStyle = '#4a6b8a'; ctx.font = '12px monospace';
+    ctx.fillText(lat.toFixed(4), 6, 16);
+    ctx.fillText(lon.toFixed(4), 6, 32);
+    return c;
+  }
+});
+const offlineGrid = new OfflineGrid({ maxZoom: 19 });
+/* 关掉 3D 变换与动画：Android WebView 83 上两者叠加会让瓦片图层不合成 */
+try { L.Browser.any3d = false; } catch (e) { }
+const map = L.map('map', {
+  zoomControl: true, preferCanvas: true, fadeAnimation: false,
+  zoomAnimation: false, markerZoomAnimation: false
+}).setView(G(CENTER[0], CENTER[1]), 17);
+const layersCtl = {};
+SOURCES.forEach(s => {
+  layersCtl[s.name] = L.tileLayer(s.tpl, s.sub ? { subdomains: [s.sub[0]], maxZoom: 19 } : { maxZoom: 19 });
+});
+layersCtl['离线网格'] = offlineGrid;
+layersCtl['画布高德'] = canvasTiles;
+L.control.layers(layersCtl, null, { position: 'topright' }).addTo(map);
+setTimeout(() => map.invalidateSize(), 300);
+
+function tileBadge(txt) {
+  const el = document.getElementById('tileBadge');
+  if (el) el.textContent = '瓦片:' + txt;
+}
+/* 诊断（?diag=1 时打印第一张瓦片几何信息） */
+if (location.search.indexOf('diag=1') >= 0) {
+  setInterval(function () {
+    try {
+      const t = document.querySelector('.leaflet-tile');
+      if (!t) return;
+      const r = t.getBoundingClientRect();
+      const cs = getComputedStyle(t);
+      tileBadge(cntOk + ' tiles | rect ' + Math.round(r.left) + ',' + Math.round(r.top) + ' ' +
+        Math.round(r.width) + 'x' + Math.round(r.height) + ' | op ' + cs.opacity + ' vis ' + cs.visibility);
+    } catch (e) { }
+  }, 1500);
+}
+
+let cntOk = 0, cntErr = 0, lastErrUrl = '', chosen = null;
+function attachCounter(layer, name) {
+  layer.on('tileload', () => {
+    cntOk++;
+    if (cntOk === 1) map.invalidateSize();
+    tileBadge(name + ' ✔' + cntOk + (cntErr ? ' ✖' + cntErr : ''));
+  });
+  layer.on('tileerror', e => {
+    cntErr++;
+    if (e && e.tile && e.tile.src) lastErrUrl = e.tile.src;
+    tileBadge(name + ' ✔' + cntOk + ' ✖' + cntErr);
+  });
+}
+/* 默认图层：电脑用真实瓦片；Android WebView 83 上瓦片常常不合成，默认给离线经纬网格，
+   用户可在右上角图层按钮切到「画布高德」试试 */
+const isAndroid = /Android/i.test(navigator.userAgent);
+const layer0 = isAndroid ? offlineGrid : canvasTiles;
+attachCounter(canvasTiles, '画布高德');
+layer0.addTo(map);
+tileBadge(isAndroid ? '离线网格（可右上角切「画布高德」）' : '画布高德 加载中…');
+
+Promise.all(SOURCES.map(s => probeTile(s.tpl, s.sub))).then(res => {
+  const idx = res.findIndex(Boolean);
+  if (idx >= 0 && SOURCES[idx].name !== '高德') {
+    map.removeLayer(layer0);
+    const alt = layersCtl[SOURCES[idx].name];
+    attachCounter(alt, SOURCES[idx].name);
+    alt.addTo(map);
+    tileBadge(SOURCES[idx].name + ' 加载中…');
+  }  setTimeout(() => {
+    if (cntOk === 0) {
+      try {
+        const rm = [];
+        map.eachLayer(l => { if (l instanceof L.TileLayer) rm.push(l); });
+        rm.forEach(l => map.removeLayer(l));
+      } catch (e) { }
+      offlineGrid.addTo(map);
+      tileBadge('离线网格（瓦片 0 张）');
+      toast('瓦片未加载成功，已切离线网格', 4000);
+    }
+  }, 6000);
+});
+
+/* ---------------- 状态 ---------------- */
+const S = { nodes: [], cps: [], mode: 'draw', poly: null, ghost: null };
+const routeLayer = L.layerGroup().addTo(map);
+const cpLayer = L.layerGroup().addTo(map);
+
+function toast(msg, ms = 1600) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms);
+}
+function redraw() {
+  routeLayer.clearLayers();
+  if (S.nodes.length) {
+    const pts = S.nodes.map(p => G(p[0], p[1]));
+    L.polyline(pts, { color: '#2f81f7', weight: 5, opacity: .95 }).addTo(routeLayer);
+    S.nodes.forEach((p, i) => {
+      const m = L.circleMarker(G(p[0], p[1]), { radius: 6, color: '#fff', weight: 2, fillColor: '#1f6feb', fillOpacity: 1 })
+        .addTo(routeLayer);
+      if (i === 0) m.bindTooltip('起点', { permanent: false });
+      m.on('click', e => { L.DomEvent.stopPropagation(e); });
+      m.on('mousedown', () => {
+        map.dragging.disable();
+        const move = ev => { const ll = map.mouseEventToLatLng(ev); S.nodes[i] = gcj2wgs(ll.lat, ll.lng); redraw(); };
+        const up = () => { map.off('mousemove', move); map.off('mouseup', up); map.dragging.enable(); hud(); };
+        map.on('mousemove', move); map.on('mouseup', up);
+      });
+    });
+    if (S.poly) L.polyline(S.poly.map(p => G(p[0], p[1])), { color: '#3fb950', weight: 3, dashArray: '6 6' }).addTo(routeLayer);
+  }
+  cpLayer.clearLayers();
+  S.cps.forEach((p, i) => {
+    L.circle(G(p[0], p[1]), { radius: +document.getElementById('rad').value, color: '#f0883e', weight: 1, fillOpacity: .12 }).addTo(cpLayer);
+    L.marker(G(p[0], p[1]), {
+      icon: L.divIcon({ className: '', html: `<div style="background:#f0883e;color:#111;font-weight:700;width:22px;height:22px;
+        border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff">${String.fromCharCode(65+i)}</div>`,
+        iconSize: [22,22], iconAnchor: [11,11] })
+    }).addTo(cpLayer);
+  });
+  hud();
+  saveLocal();
+}
+function saveLocal() {
+  try {
+    localStorage.setItem('campusim.v1', JSON.stringify({
+      nodes: S.nodes, cps: S.cps,
+      pace: document.getElementById('pace').value, spm: document.getElementById('spm').value,
+      jit: document.getElementById('jit').value, spmJ: document.getElementById('spmJ').value,
+      rpkm: document.getElementById('rpkm').value, rmin: document.getElementById('rmin').value,
+      rmax: document.getElementById('rmax').value, rad: document.getElementById('rad').value
+    }));
+  } catch (e) { }
+}
+function loadLocal() {
+  try {
+    const raw = localStorage.getItem('campusim.v1');
+    if (!raw) return;
+    const o = JSON.parse(raw);
+    if (o.nodes) S.nodes = o.nodes;
+    if (o.cps) S.cps = o.cps;
+    ['pace','spm','jit','spmJ','rpkm','rmin','rmax','rad'].forEach(k => { if (o[k]) document.getElementById(k).value = o[k]; });
+  } catch (e) { }
+}
+function routeLen(pts, closed) {
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) d += hav(pts[i-1], pts[i]);
+  if (closed && pts.length > 2) d += hav(pts[pts.length-1], pts[0]);
+  return d;
+}
+function fmtTime(s) { const m = Math.floor(s/60); return m + ':' + String(Math.round(s%60)).padStart(2,'0'); }
+function hud() {
+  const closed = document.getElementById('bClose').classList.contains('on');
+  const len = routeLen(S.nodes, closed);
+  const pace = +document.getElementById('pace').value || 330;
+  const sim = simulate(S.nodes, closed);
+  document.getElementById('hLen').textContent = len.toFixed(0);
+  document.getElementById('hTime').textContent = sim ? sim.time : fmtTime(len * pace / 1000);
+  document.getElementById('hSteps').textContent = sim ? sim.steps : '—';
+  document.getElementById('hCheck').innerHTML = `点位 ${S.nodes.length} · 打卡 ${S.cps.length}`;
+  document.getElementById('out').textContent = sim ? sim.report : '（先画线再预演）';
+}
+
+/* ---------------- 交互 ---------------- */
+map.on('click', e => {
+  const w = gcj2wgs(e.latlng.lat, e.latlng.lng);
+  if (S.mode === 'draw') { S.nodes.push(w); }
+  else if (S.mode === 'cp') { S.cps.push(w); }
+  redraw();
+});
+document.getElementById('bDraw').onclick = () => setMode('draw');
+document.getElementById('bCp').onclick = () => setMode('cp');
+function setMode(m) {
+  S.mode = m;
+  document.getElementById('bDraw').classList.toggle('on', m === 'draw');
+  document.getElementById('bCp').classList.toggle('on', m === 'cp');
+  document.getElementById('modePill').textContent = m === 'draw' ? '画线模式' : '打卡点模式';
+}
+document.getElementById('bUndo').onclick = () => { S.mode === 'cp' ? S.cps.pop() : S.nodes.pop(); redraw(); cpList(); };
+document.getElementById('bClear').onclick = () => { S.nodes = []; S.cps = []; S.poly = null; redraw(); cpList(); };
+document.getElementById('bClose').onclick = e => { e.target.classList.toggle('on'); redraw(); };
+document.getElementById('rad').onchange = redraw;
+document.getElementById('bSim').onclick = () => {
+  const closed = document.getElementById('bClose').classList.contains('on');
+  const sim = simulate(S.nodes, closed);
+  if (!sim) return toast('先画至少两个点');
+  S.poly = sim.samples;
+  drawSpeed(sim);
+  redraw();
+  toast('预演完成：' + sim.report.split('\n')[0]);
+};
+function cpList() {
+  const box = document.getElementById('cpList');
+  box.innerHTML = S.cps.map((p, i) =>
+    `<span class="cp">${String.fromCharCode(65+i)} ${p[0].toFixed(5)},${p[1].toFixed(5)}<span class="x" data-i="${i}">✕</span></span>`).join('');
+  box.querySelectorAll('.x').forEach(x => x.onclick = () => { S.cps.splice(+x.dataset.i, 1); cpList(); redraw(); });
+}
+
+/* ---------------- 运动模型（与模块 Java 侧保持一致） ---------------- */
+function rnd(seed) { let s = seed >>> 0 || 1; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+function gauss(R) { let u = 0, v = 0; while (u === 0) u = R(); while (v === 0) v = R(); return Math.sqrt(-2*Math.log(u)) * Math.cos(2*PI*v); }
+
+function simulate(nodes, closed) {
+  if (!nodes || nodes.length < 2) return null;
+  const pts = nodes.slice(); if (closed) pts.push(pts[0]);
+  const total = routeLen(pts, false); if (total < 10) return null;
+
+  const pace = +document.getElementById('pace').value || 330;
+  const jit = +document.getElementById('jit').value || 0.06;
+  const spmB = +document.getElementById('spm').value || 172;
+  const spmJ = +document.getElementById('spmJ').value || 4;
+  const rpkm = +document.getElementById('rpkm').value || 0;
+  const rmin = +document.getElementById('rmin').value || 15;
+  const rmax = +document.getElementById('rmax').value || 60;
+  const seed = +document.getElementById('seed').value || 0;
+  const R = rnd(seed || 12345);
+
+  const target = 1000 / pace;
+  let s = 0, t = 0, v = target, rest = 0, steps = 0, dist = 0, spm = spmB;
+  let nextRest = rpkm > 0 ? (-Math.log(1 - R()) / (rpkm * target / 1000)) : Infinity;
+  const samples = [], speeds = [], rests = [];
+  let minMove = 0.05;
+  while (t < 7200) {
+    // 速度：一阶惯性 + OU 噪声
+    const tau = 2.5;
+    v += (target - v) * (1 / tau) + gauss(R) * target * jit * 0.45;
+    v = Math.min(target * 1.55, Math.max(target * 0.55, v));
+    spm = spmB + gauss(R) * spmJ; spm = Math.max(spmB * .7, Math.min(spmB * 1.3, spm));
+
+    if (rest > 0) {
+      rest -= 1; v = Math.max(0, v * 0.45);
+      if (v < minMove) { v = 0; spm = 0; }
+    } else if (t >= nextRest && rpkm > 0) {
+      const d = rmin + R() * (rmax - rmin);
+      rests.push({ t, d: Math.round(d) });
+      rest = Math.round(d);
+      nextRest = t + Math.round(d) + (-Math.log(1 - R()) / (rpkm * target / 1000));
+    }
+
+    const stride = spm > 0 ? Math.min(1.6, Math.max(0.6, v / (spm / 60))) : 0;
+    if (v > 0) { steps += spm / 60; dist += v; }
+
+    // 沿线推进
+    s = (s + v) % total;
+    let rem = s, i = 0;
+    while (i < pts.length - 1 && rem > hav(pts[i], pts[i+1])) { rem -= hav(pts[i], pts[i+1]); i++; }
+    if (i >= pts.length - 1) i = pts.length - 2;
+    const seg = Math.max(1e-6, hav(pts[i], pts[i+1]));
+    const f = Math.min(1, rem / seg);
+    const lat = pts[i][0] + (pts[i+1][0] - pts[i][0]) * f;
+    const lng = pts[i][1] + (pts[i+1][1] - pts[i][1]) * f;
+    samples.push([lat, lng]);
+    speeds.push(v);
+    t++;
+    if (s >= total - 0.001 && total > 0 && dist > total * 1.0) { /* wrap */ }
+    if (dist >= total * 1.0) break;
+  }
+  const avg = dist / t;
+  const stepsFromDist = dist / (avg / (spmB / 60));
+  const consist = Math.abs(steps - stepsFromDist) / Math.max(1, stepsFromDist) * 100;
+  const report =
+    `里程 ${dist.toFixed(0)} m / 用时 ${fmtTime(t)} / 均速 ${avg.toFixed(2)} m/s（${(1000/avg).toFixed(0)} s/km）\n` +
+    `步数 ${steps.toFixed(0)} / 步幅 ${(dist/Math.max(1,steps)).toFixed(2)} m / 步频均值 ${spmB}\n` +
+    `休息 ${rests.length} 次${rests.length ? '：' + rests.map(r => `第${fmtTime(r.t)} 停${r.d}s`).join('，') : ''}\n` +
+    `步数-距离自洽偏差 ${consist.toFixed(2)}%（<2% 安全）\n` +
+    `打卡点 ${document.getElementById('cpList').children.length} 个，半径 ${document.getElementById('rad').value}m`;
+  return { samples, speeds, steps: steps.toFixed(0), time: fmtTime(t), report, rests };
+}
+
+function drawSpeed(sim) {
+  const c = document.getElementById('spd'), ctx = c.getContext('2d');
+  const W = c.width = c.clientWidth * 2, H = c.height = c.clientHeight * 2;
+  ctx.clearRect(0, 0, W, H);
+  const vmax = Math.max(...sim.speeds, 1) * 1.15;
+  ctx.strokeStyle = '#2a3442'; ctx.beginPath();
+  for (let i = 1; i < 4; i++) { const y = H*i/4; ctx.moveTo(0,y); ctx.lineTo(W,y); } ctx.stroke();
+  ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 2; ctx.beginPath();
+  sim.speeds.forEach((v, i) => {
+    const x = i / Math.max(1, sim.speeds.length - 1) * W;
+    const y = H - (v / vmax) * H * 0.92 - 4;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(240,136,62,.28)';
+  sim.rests.forEach(r => {
+    const x = r.t / Math.max(1, sim.speeds.length - 1) * W;
+    ctx.fillRect(x, 0, Math.max(2, r.d / Math.max(1, sim.speeds.length-1) * W), H);
+  });
+}
+
+/* ---------------- 导出 ---------------- */
+function buildConfig() {
+  const closed = document.getElementById('bClose').classList.contains('on');
+  const nodes = S.nodes.slice(); if (closed && nodes.length > 2) nodes.push(nodes[0]);
+  return {
+    enabled: true,
+    targets: ['com.lptiyu.tanke'],
+    route: nodes.map(p => [+p[0].toFixed(6), +p[1].toFixed(6)]),
+    checkpoints: S.cps.map(p => [+p[0].toFixed(6), +p[1].toFixed(6)]),
+    checkpointRadius: +document.getElementById('rad').value || 25,
+    paceSecPerKm: +document.getElementById('pace').value || 330,
+    speedJitter: +document.getElementById('jit').value || 0.06,
+    spmBase: +document.getElementById('spm').value || 172,
+    spmJitter: +document.getElementById('spmJ').value || 4,
+    restsPerKm: +document.getElementById('rpkm').value || 0,
+    restMinSec: +document.getElementById('rmin').value || 15,
+    restMaxSec: +document.getElementById('rmax').value || 60,
+    randomStart: document.getElementById('rStart').checked,
+    randomDir: document.getElementById('rDir').checked,
+    heartbeat: document.getElementById('hb').checked ? 10 : 0,
+    seed: +document.getElementById('seed').value || 0,
+    wifi: true, cell: true, ble: true, accel: true
+  };
+}
+document.getElementById('bGen').onclick = () => {
+  const cfg = buildConfig();
+  if (cfg.route.length < 2) return toast('先画至少两个点');
+  const txt = JSON.stringify(cfg, null, 2);
+  document.getElementById('out').textContent = txt;
+  window._lastCfg = txt;
+  toast('配置已生成（看"自检/输出"）');
+};
+document.getElementById('bPush').onclick = async () => {
+  const cfg = buildConfig();
+  const txt = JSON.stringify(cfg, null, 2);
+  window._lastCfg = txt;
+  // 1) 手机 App 内 WebView：走 Android 桥存到 App 目录
+  if (window.CampusBridge && window.CampusBridge.saveConfig) {
+    const p = window.CampusBridge.saveConfig(JSON.stringify(cfg));
+    toast('已保存到手机：' + p + '（用 simctl apply 生效）', 4000);
+    return;
+  }
+  // 2) PC：交给 mkserver 直接 adb push
+  try {
+    const r = await fetch('/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: txt });
+    const j = await r.json();
+    toast(j.ok ? '已推送：' + j.detail : '推送失败：' + j.detail, 3000);
+    return;
+  } catch (e) { /* 3) 退回下载 */ }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
+  a.download = 'campusim.json'; a.click();
+  toast('已下载 campusim.json（用 simctl apply 推送）', 3000);
+};
+
+/* 手机 WebView 里由 Android 注入的桥 */
+function saveToPhone() {
+  if (window.CampusBridge && window.CampusBridge.saveConfig) {
+    window.CampusBridge.saveConfig(JSON.stringify(buildConfig()));
+    toast('已保存到 App 目录，用 simctl apply 生效', 3000);
+  } else { toast('当前环境没有 Android 桥'); }
+}
+
+/* 初始定位：默认武汉理工一带，可用 URL 参数 ?lat=&lng= 覆盖 */
+const q = new URLSearchParams(location.search);
+if (q.get('lat') && q.get('lng')) map.setView(G(+q.get('lat'), +q.get('lng')), 18);
+loadLocal();
+/* 手机端：把 App 里保存过的配置读回来继续画 */
+if (window.CampusBridge && window.CampusBridge.loadConfig) {
+  try {
+    const txt = window.CampusBridge.loadConfig();
+    if (txt && txt.length > 20) {
+      const c = JSON.parse(txt);
+      if (c.route) S.nodes = c.route.map(p => [p[0], p[1]]);
+      if (c.checkpoints) S.cps = c.checkpoints.map(p => [p[0], p[1]]);
+      ['paceSecPerKm','spmBase','speedJitter','spmJitter','restsPerKm','restMinSec','restMaxSec','checkpointRadius']
+        .forEach(k => { });
+      if (c.paceSecPerKm) document.getElementById('pace').value = c.paceSecPerKm;
+      if (c.spmBase) document.getElementById('spm').value = c.spmBase;
+      if (c.speedJitter) document.getElementById('jit').value = c.speedJitter;
+      if (c.checkpointRadius) document.getElementById('rad').value = c.checkpointRadius;
+      toast('已载入手机里保存的配置', 2500);
+    }
+  } catch (e) { }
+}
+cpList(); redraw();
+</script>
+</body>
+</html>
