@@ -4,6 +4,9 @@
 把「校园跑」这件事在**自己的设备**上完整地跑一遍：轨迹、朝向、步频步幅、传感器、WiFi/基站环境全部自洽。
 
 LSPosed 模块 + 可视化路线编辑器 · 无 native 依赖 · arm64 / x86_64 通用 · **v1.0.0**
+步道乐跑扫码登录工具移步<https://github.com/switchsw6/lptiyuQRBridge>
+交流群708449898
+视频教程 <https://www.bilibili.com/video/BV1HRW86nEUi?vd_source=64788552505778ac7e0b7fe0a8979f37>
 
 > 源码在本仓库；编译好的 APK 见 [Releases](../../releases)。
 > 使用前请先读文末的 [免责声明](#免责声明)。
